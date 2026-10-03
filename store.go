@@ -36,10 +36,13 @@ type Response struct {
 }
 
 // Entry describes the current state of a key in a Store.
+// WARNING: Response must not be modified after Complete,
+// as Entry.Response is a pointer and copies of Entry share the same Response.
 type Entry struct {
 	State       State
 	Fingerprint string
-	Response    *Response
+	// Response must not be modified after Complete, as it may be shared between Entry copies.
+	Response *Response
 }
 
 // Store persists idempotency records and serializes concurrent use of one key.
