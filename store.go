@@ -41,8 +41,7 @@ type Response struct {
 type Entry struct {
 	State       State
 	Fingerprint string
-	// Response must not be modified after Complete, as it may be shared between Entry copies.
-	Response *Response
+	Response    *Response
 }
 
 // Store persists idempotency records and serializes concurrent use of one key.
@@ -63,4 +62,6 @@ var (
 	ErrInProgress = errors.New("idempotency: request is still in progress")
 	// ErrBadKey is returned when an idempotency key fails validation.
 	ErrBadKey = errors.New("idempotency: bad key")
+	// ErrNotFound is returned when there is no in-progress record for the key.
+	ErrNotFound = errors.New("idempotency: no in-progress record for key")
 )

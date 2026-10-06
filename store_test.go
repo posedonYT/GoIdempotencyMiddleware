@@ -14,6 +14,7 @@ func TestErrorsAreMatchable(t *testing.T) {
 		{"ErrKeyMismatch", ErrKeyMismatch},
 		{"ErrInProgress", ErrInProgress},
 		{"ErrBadKey", ErrBadKey},
+		{"ErrNotFound", ErrNotFound},
 	}
 
 	for i, tc := range sentinels {
