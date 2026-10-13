@@ -1,0 +1,38 @@
+/Index.md
+
+# Local experiments (plan stage 1)
+/scratch/
+
+# Tests and coverage
+*.test
+*.out
+cover.out
+coverage/
+coverage.txt
+
+# Build
+/bin/
+
+# IDE
+.idea/
+.vscode/
+.fleet/
+.editorconfig
+
+# Cursor
+.cursor/
+.cursorignore
+.cursorindexingignore
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+!.env.example
+!.env.template
+
+# Logs
+*.log
