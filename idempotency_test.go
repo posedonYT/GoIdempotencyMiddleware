@@ -6,14 +6,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
 // callCounter is a handler that records how many times it was called.
-type callCounter struct{ calls int }
+type callCounter struct{ calls atomic.Int32 }
 
 func (c *callCounter) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
-	c.calls++
+	c.calls.Add(1)
 	w.WriteHeader(http.StatusTeapot)
 }
 
@@ -38,8 +39,8 @@ func TestMiddlewarePassesThroughOtherMethods(t *testing.T) {
 			t.Errorf("GET key=%q: status = %d, want %d", key, w.Code, http.StatusTeapot)
 		}
 	}
-	if next.calls != 3 {
-		t.Errorf("next called %d times, want 3", next.calls)
+	if next.calls.Load() != 3 {
+		t.Errorf("next called %d times, want 3", next.calls.Load())
 	}
 }
 
@@ -63,8 +64,8 @@ func TestMiddlewareMissingKey(t *testing.T) {
 		h := New(NewMemoryStore())(next)
 
 		w := serve(h, http.MethodPost, "")
-		if w.Code != http.StatusTeapot || next.calls != 1 {
-			t.Errorf("status = %d, calls = %d; want %d, 1", w.Code, next.calls, http.StatusTeapot)
+		if w.Code != http.StatusTeapot || next.calls.Load() != 1 {
+			t.Errorf("status = %d, calls = %d; want %d, 1", w.Code, next.calls.Load(), http.StatusTeapot)
 		}
 	})
 
@@ -79,8 +80,8 @@ func TestMiddlewareMissingKey(t *testing.T) {
 		if !strings.Contains(w.Body.String(), "Idempotency-Key") {
 			t.Errorf("body = %q, want it to name the header", w.Body.String())
 		}
-		if next.calls != 0 {
-			t.Errorf("next called %d times, want 0", next.calls)
+		if next.calls.Load() != 0 {
+			t.Errorf("next called %d times, want 0", next.calls.Load())
 		}
 	})
 
@@ -122,8 +123,8 @@ func TestMiddlewareInvalidKey(t *testing.T) {
 			if !strings.Contains(w.Body.String(), ErrBadKey.Error()) {
 				t.Errorf("body = %q, want the ErrBadKey message", w.Body.String())
 			}
-			if next.calls != 0 {
-				t.Errorf("next called %d times, want 0", next.calls)
+			if next.calls.Load() != 0 {
+				t.Errorf("next called %d times, want 0", next.calls.Load())
 			}
 		})
 	}
@@ -195,8 +196,8 @@ func TestMiddlewareValidKeyReachesHandler(t *testing.T) {
 	h := New(NewMemoryStore())(next)
 
 	w := serve(h, http.MethodPost, "valid-key")
-	if w.Code != http.StatusTeapot || next.calls != 1 {
-		t.Errorf("status = %d, calls = %d; want %d, 1", w.Code, next.calls, http.StatusTeapot)
+	if w.Code != http.StatusTeapot || next.calls.Load() != 1 {
+		t.Errorf("status = %d, calls = %d; want %d, 1", w.Code, next.calls.Load(), http.StatusTeapot)
 	}
 }
 
