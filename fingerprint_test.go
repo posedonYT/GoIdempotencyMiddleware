@@ -143,7 +143,8 @@ func TestStoreKey(t *testing.T) {
 	})
 
 	t.Run("deterministic", func(t *testing.T) {
-		if storeKey("s", "k") != storeKey("s", "k") {
+		first, second := storeKey("s", "k"), storeKey("s", "k")
+		if first != second {
 			t.Fatal("storeKey is not deterministic")
 		}
 	})

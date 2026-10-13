@@ -455,3 +455,18 @@ func TestOversizedResponseIsNotStored(t *testing.T) {
 		t.Errorf("repeat: status = %d, want %d", w.Code, http.StatusConflict)
 	}
 }
+
+func TestDifferentKeysAreIndependent(t *testing.T) {
+	next := &createdHandler{}
+	h := New(NewMemoryStore())(next)
+
+	do(h, http.MethodPost, "/orders", "k1", "x")
+	w := do(h, http.MethodPost, "/orders", "k2", "x")
+
+	if next.calls.Load() != 2 {
+		t.Errorf("handler called %d times, want 2", next.calls.Load())
+	}
+	if _, ok := w.Header()[replayedHeader]; ok {
+		t.Error("a new key was replayed")
+	}
+}

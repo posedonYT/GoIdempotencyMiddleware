@@ -46,10 +46,11 @@ func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, erro
 
 func fingerprint(r *http.Request, body []byte) string {
 	h := sha256.New()
-	io.WriteString(h, r.Method)
-	io.WriteString(h, "\n")
-	io.WriteString(h, r.URL.RequestURI())
-	io.WriteString(h, "\n")
-	h.Write(body)
+	// hash.Hash writes never return an error.
+	_, _ = io.WriteString(h, r.Method)
+	_, _ = io.WriteString(h, "\n")
+	_, _ = io.WriteString(h, r.URL.RequestURI())
+	_, _ = io.WriteString(h, "\n")
+	_, _ = h.Write(body)
 	return hex.EncodeToString(h.Sum(nil))
 }
