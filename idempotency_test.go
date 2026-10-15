@@ -2,6 +2,7 @@ package idempotency
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -161,8 +162,11 @@ func TestWriteError(t *testing.T) {
 		{"bad key", ErrBadKey, http.StatusBadRequest, "", ErrBadKey.Error()},
 		{"wrapped bad key", fmt.Errorf("%w: empty", ErrBadKey), http.StatusBadRequest, "", "empty"},
 		{"key mismatch", ErrKeyMismatch, http.StatusUnprocessableEntity, "", ErrKeyMismatch.Error()},
-		{"in progress", ErrInProgress, http.StatusConflict, "1", ErrInProgress.Error()},
-		{"wrapped in progress", fmt.Errorf("acquire: %w", ErrInProgress), http.StatusConflict, "1", "acquire"},
+		{"in progress", ErrInProgress, http.StatusConflict, "", ErrInProgress.Error()},
+		{"wrapped in progress", fmt.Errorf("acquire: %w", ErrInProgress), http.StatusConflict, "", "acquire"},
+		{"body too large", ErrBodyTooLarge, http.StatusRequestEntityTooLarge, "", ErrBodyTooLarge.Error()},
+		{"bad body", fmt.Errorf("%w: boom", ErrBadBody), http.StatusBadRequest, "", ErrBadBody.Error()},
+		{"store full", ErrStoreFull, http.StatusServiceUnavailable, "", ErrStoreFull.Error()},
 		{"unknown", errors.New("db password is hunter2"), http.StatusInternalServerError, "", "internal error"},
 		{"not found is internal", ErrNotFound, http.StatusInternalServerError, "", "internal error"},
 	}
@@ -180,6 +184,13 @@ func TestWriteError(t *testing.T) {
 			}
 			if !strings.Contains(w.Body.String(), tc.wantBody) {
 				t.Errorf("body = %q, want it to contain %q", w.Body.String(), tc.wantBody)
+			}
+			if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+				t.Errorf("Content-Type = %q, want JSON", ct)
+			}
+			var payload struct{ Error string }
+			if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil || payload.Error == "" {
+				t.Errorf("body %q is not {\"error\": ...}: %v", w.Body.String(), err)
 			}
 		})
 	}
@@ -405,13 +416,37 @@ func TestInProgressThenReplay(t *testing.T) {
 	}
 }
 
-func TestUnreadableBody(t *testing.T) {
+func TestBodyOverLimitIs413(t *testing.T) {
 	next := &createdHandler{}
 	h := New(NewMemoryStore(), WithMaxRequestBody(4))(next)
 
 	w := do(h, http.MethodPost, "/", "k1", "too long body")
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusRequestEntityTooLarge)
+	}
+	if next.calls.Load() != 0 {
+		t.Errorf("handler called %d times, want 0", next.calls.Load())
+	}
+}
+
+type brokenBody struct{}
+
+func (brokenBody) Read([]byte) (int, error) { return 0, errors.New("connection reset") }
+
+func TestUnreadableBodyIs400(t *testing.T) {
+	next := &createdHandler{}
+	h := New(NewMemoryStore())(next)
+
+	r := httptest.NewRequest(http.MethodPost, "/", brokenBody{})
+	r.Header.Set("Idempotency-Key", "k1")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if strings.Contains(w.Body.String(), "connection reset") {
+		t.Errorf("body %q leaks the read error", w.Body.String())
 	}
 	if next.calls.Load() != 0 {
 		t.Errorf("handler called %d times, want 0", next.calls.Load())
@@ -450,9 +485,11 @@ func TestOversizedResponseIsNotStored(t *testing.T) {
 	if w.Body.String() != "0123456789" {
 		t.Errorf("body = %q, client must still get the full response", w.Body.String())
 	}
-	// Temporary behaviour until pass 3: the record stays in progress.
-	if w := do(h, http.MethodPost, "/", "k1", "x"); w.Code != http.StatusConflict {
-		t.Errorf("repeat: status = %d, want %d", w.Code, http.StatusConflict)
+	// The response cannot be stored, so the key is released and a retry runs
+	// the handler again instead of getting 409.
+	w = do(h, http.MethodPost, "/", "k1", "x")
+	if w.Code != http.StatusOK || calls.Load() != 2 {
+		t.Errorf("repeat: status = %d, calls = %d; want 200, 2", w.Code, calls.Load())
 	}
 }
 

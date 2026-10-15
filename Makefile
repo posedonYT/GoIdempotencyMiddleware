@@ -1,4 +1,4 @@
-.PHONY: help vet test test-race test-cover bench lint fmt check scratch
+.PHONY: help vet test test-race test-cover bench fuzz examples lint fmt check scratch
 
 GO ?= go
 GOLANGCI_LINT ?= golangci-lint
@@ -10,6 +10,8 @@ help:
 	@echo "  make test-race   go test -race -count=1 ./..."
 	@echo "  make test-cover  go test -cover ./..."
 	@echo "  make bench       go test -bench=. -benchmem ./..."
+	@echo "  make fuzz        run every fuzz test for 10s"
+	@echo "  make examples    build and test the examples"
 	@echo "  make lint        golangci-lint run ./..."
 	@echo "  make fmt         gofmt + goimports (if installed)"
 	@echo "  make check       vet + test-race + lint"
@@ -29,6 +31,15 @@ test-cover:
 
 bench:
 	$(GO) test -bench=. -benchmem ./...
+
+fuzz:
+	$(GO) test -run '^$$' -fuzz '^FuzzValidateKey$$' -fuzztime 10s .
+	$(GO) test -run '^$$' -fuzz '^FuzzFingerprint$$' -fuzztime 10s .
+	$(GO) test -run '^$$' -fuzz '^FuzzStoreKeyIsInjective$$' -fuzztime 10s .
+
+examples:
+	$(GO) build ./examples/...
+	$(GO) test -race -count=1 ./examples/...
 
 lint:
 	$(GOLANGCI_LINT) run ./...

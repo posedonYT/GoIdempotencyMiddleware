@@ -4,7 +4,9 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 )
 
 // apply builds a config from the defaults and the given options.
@@ -167,5 +169,76 @@ func TestOptionsLastWins(t *testing.T) {
 	c := apply(WithHeader("A"), WithHeader("B"))
 	if c.header != "B" {
 		t.Errorf("header = %q, want the last option %q", c.header, "B")
+	}
+}
+
+func TestWithHeaderIsCanonicalized(t *testing.T) {
+	c := apply(WithHeader("x-request-id"))
+	if c.header != "X-Request-Id" {
+		t.Errorf("header = %q, want %q", c.header, "X-Request-Id")
+	}
+}
+
+func TestDefaultsOfNewOptions(t *testing.T) {
+	c := defaultConfig()
+	if c.failOpen {
+		t.Error("failOpen = true, want fail closed by default")
+	}
+	if c.wait != 0 {
+		t.Errorf("wait = %v, want waiting off by default", c.wait)
+	}
+	for status, want := range map[int]bool{200: true, 201: true, 404: true, 422: true, 500: false, 503: false} {
+		if got := c.cacheable(status); got != want {
+			t.Errorf("cacheable(%d) = %v, want %v", status, got, want)
+		}
+	}
+}
+
+func TestNewOptions(t *testing.T) {
+	c := apply(WithFailOpen(true), WithWait(time.Second),
+		WithCacheable(func(int) bool { return false }),
+		WithErrorHandler(func(http.ResponseWriter, *http.Request, error) {}))
+
+	if !c.failOpen {
+		t.Error("WithFailOpen(true) did not set failOpen")
+	}
+	if c.wait != time.Second {
+		t.Errorf("wait = %v, want 1s", c.wait)
+	}
+	if c.cacheable(200) {
+		t.Error("WithCacheable was not applied")
+	}
+	if c.errorHandler == nil {
+		t.Error("errorHandler = nil")
+	}
+}
+
+func TestNewPanicsOnBadConfig(t *testing.T) {
+	tests := []struct {
+		name  string
+		store Store
+		opts  []Option
+		want  string
+	}{
+		{"nil store", nil, nil, "store"},
+		{"empty header", NewMemoryStore(), []Option{WithHeader("")}, "WithHeader"},
+		{"zero request limit", NewMemoryStore(), []Option{WithMaxRequestBody(0)}, "WithMaxRequestBody"},
+		{"negative request limit", NewMemoryStore(), []Option{WithMaxRequestBody(-1)}, "WithMaxRequestBody"},
+		{"zero response limit", NewMemoryStore(), []Option{WithMaxResponseBody(0)}, "WithMaxResponseBody"},
+		{"nil cacheable", NewMemoryStore(), []Option{WithCacheable(nil)}, "WithCacheable"},
+		{"nil error handler", NewMemoryStore(), []Option{WithErrorHandler(nil)}, "WithErrorHandler"},
+		{"negative wait", NewMemoryStore(), []Option{WithWait(-time.Second)}, "WithWait"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				msg, _ := recover().(string)
+				if !strings.Contains(msg, tc.want) {
+					t.Errorf("panic = %q, want it to mention %q", msg, tc.want)
+				}
+			}()
+			New(tc.store, tc.opts...)
+		})
 	}
 }

@@ -2,20 +2,50 @@ package idempotency
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"slices"
+	"time"
 )
 
 // replayedHeader marks a response replayed from the store. It is the only
 // place the name is spelled out.
 const replayedHeader = "Idempotent-Replayed"
 
+// maxWaitRounds bounds how many times a waiting request retries Acquire
+// after being woken up, so a key that keeps being released and re-acquired
+// cannot hold a request forever.
+const maxWaitRounds = 3
+
+// New returns middleware that makes mutating requests idempotent.
+//
+// A request with an idempotency key (by default the Idempotency-Key header) is
+// executed once. Repeating it with the same key and the same request replays
+// the stored response without calling the handler; the replay carries the
+// Idempotent-Replayed: true header. Reusing the key for a different request
+// gives 422, and a repeat that arrives while the first request is still
+// running gives 409 (or waits, see WithWait).
+//
+// Requests with other methods, and requests without a key (unless WithRequired
+// is set), pass through untouched. New panics if store is nil or an option has
+// an invalid value.
 func New(store Store, opts ...Option) func(http.Handler) http.Handler {
+	if store == nil {
+		panic("idempotency: New: store must not be nil")
+	}
 	cfg := defaultConfig()
 	for _, opt := range opts {
 		opt(&cfg)
+	}
+	cfg.validate()
+
+	fail := func(w http.ResponseWriter, r *http.Request, err error) {
+		if errors.Is(err, ErrInProgress) {
+			w.Header().Set("Retry-After", "1")
+		}
+		cfg.errorHandler(w, r, err)
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -27,21 +57,20 @@ func New(store Store, opts ...Option) func(http.Handler) http.Handler {
 			key := r.Header.Get(cfg.header)
 			if key == "" {
 				if cfg.required {
-					writeError(w, fmt.Errorf("%w: header %s is required", ErrBadKey, cfg.header))
+					fail(w, r, fmt.Errorf("%w: header %s is required", ErrBadKey, cfg.header))
 					return
 				}
 				next.ServeHTTP(w, r)
 				return
 			}
 			if err := validateKey(key); err != nil {
-				writeError(w, err)
+				fail(w, r, err)
 				return
 			}
 
 			body, err := readBody(w, r, cfg.maxRequestBody)
 			if err != nil {
-				// TODO(pass 3): 413 for a body over the limit.
-				http.Error(w, "cannot read request body", http.StatusBadRequest)
+				fail(w, r, err)
 				return
 			}
 			fp := fingerprint(r, body)
@@ -52,9 +81,13 @@ func New(store Store, opts ...Option) func(http.Handler) http.Handler {
 			}
 			sk := storeKey(scope, key)
 
-			entry, acquired, err := store.Acquire(r.Context(), sk, fp)
+			entry, acquired, err := acquire(r.Context(), store, cfg.wait, sk, fp)
 			if err != nil {
-				writeError(w, err)
+				if cfg.failOpen {
+					next.ServeHTTP(w, r)
+					return
+				}
+				fail(w, r, err)
 				return
 			}
 			if !acquired {
@@ -63,46 +96,107 @@ func New(store Store, opts ...Option) func(http.Handler) http.Handler {
 				// one is still running.
 				switch {
 				case entry.Fingerprint != fp:
-					writeError(w, ErrKeyMismatch)
+					fail(w, r, ErrKeyMismatch)
 				case entry.State == StateInProgress:
-					writeError(w, ErrInProgress)
+					fail(w, r, ErrInProgress)
 				default:
 					replay(w, entry.Response)
 				}
 				return
 			}
 
-			// Complete must survive the client disconnecting mid-request.
+			// Complete and Release must survive the client disconnecting.
 			ctx := context.WithoutCancel(r.Context())
+
+			// If the handler panics, finished stays false and the deferred
+			// Release frees the key. No recover is needed: the panic keeps
+			// going and net/http logs it and closes the connection.
+			finished := false
+			defer func() {
+				if !finished {
+					_ = store.Release(ctx, sk)
+				}
+			}()
+
 			rec := newRecorder(w, cfg.maxResponseBody)
 			next.ServeHTTP(rec, r)
+			finished = true
 
-			// If the response did not fit the limit (ok == false) the record
-			// stays in progress until lockTimeout.
-			// TODO(pass 3): release the key in that case.
-			if resp, ok := rec.result(); ok {
-				// The response is already sent, so there is nobody to report
-				// a failed Complete to.
-				_ = store.Complete(ctx, sk, resp)
+			// The response is already sent, so a failing store call cannot be
+			// reported to the client. A record that could not be completed is
+			// released, and as a last resort expires after the lock timeout.
+			resp, ok := rec.result()
+			if ok && cfg.cacheable(resp.Status) {
+				if err := store.Complete(ctx, sk, resp); err != nil {
+					_ = store.Release(ctx, sk)
+				}
+				return
 			}
+			_ = store.Release(ctx, sk)
 		})
 	}
 }
 
-// writeError maps a package error to an HTTP response.
-// Unknown errors are reported with a fixed text so internals do not leak.
+// acquire calls store.Acquire. If wait is positive, the store implements
+// Waiter and the same request is still in progress, it waits for it to finish
+// (at most wait in total) and tries again. It returns the last Acquire result,
+// so a timeout ends up as an in-progress entry, which becomes 409.
+func acquire(ctx context.Context, store Store, wait time.Duration, key, fp string) (Entry, bool, error) {
+	waiter, canWait := store.(Waiter)
+	waitCtx := ctx
+	if wait > 0 && canWait {
+		var cancel context.CancelFunc
+		waitCtx, cancel = context.WithTimeout(ctx, wait)
+		defer cancel()
+	}
+
+	for round := 0; ; round++ {
+		entry, acquired, err := store.Acquire(ctx, key, fp)
+		if err != nil || acquired {
+			return entry, acquired, err
+		}
+		stillRunning := entry.Fingerprint == fp && entry.State == StateInProgress
+		if !stillRunning || wait <= 0 || !canWait || round >= maxWaitRounds {
+			return entry, acquired, nil
+		}
+		if waiter.Wait(waitCtx, key) != nil {
+			// Timed out or the client went away: report the key as busy.
+			return entry, acquired, nil
+		}
+	}
+}
+
+// writeError is the default error handler. It maps a package error to a JSON
+// response. Unknown errors are reported with a fixed text so internals do not
+// leak.
 func writeError(w http.ResponseWriter, err error) {
+	status, msg := http.StatusInternalServerError, "internal error"
 	switch {
 	case errors.Is(err, ErrBadKey):
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		status, msg = http.StatusBadRequest, err.Error()
+	case errors.Is(err, ErrBadBody):
+		status, msg = http.StatusBadRequest, ErrBadBody.Error()
+	case errors.Is(err, ErrBodyTooLarge):
+		status, msg = http.StatusRequestEntityTooLarge, err.Error()
 	case errors.Is(err, ErrKeyMismatch):
-		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		status, msg = http.StatusUnprocessableEntity, err.Error()
 	case errors.Is(err, ErrInProgress):
-		w.Header().Set("Retry-After", "1")
-		http.Error(w, err.Error(), http.StatusConflict)
-	default:
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		status, msg = http.StatusConflict, err.Error()
+	case errors.Is(err, ErrStoreFull):
+		status, msg = http.StatusServiceUnavailable, ErrStoreFull.Error()
 	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(struct {
+		Error string `json:"error"`
+	}{msg})
+}
+
+// defaultErrorHandler is the ErrorHandler used unless WithErrorHandler is set.
+func defaultErrorHandler(w http.ResponseWriter, _ *http.Request, err error) {
+	writeError(w, err)
 }
 
 // replay writes a stored response. Headers must be set before WriteHeader,

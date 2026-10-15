@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -36,7 +37,11 @@ func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, erro
 
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read request body %w", err)
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return nil, fmt.Errorf("%w (limit is %d bytes): %w", ErrBodyTooLarge, tooLarge.Limit, err)
+		}
+		return nil, fmt.Errorf("%w: %w", ErrBadBody, err)
 	}
 
 	r.Body = io.NopCloser(bytes.NewReader(data))

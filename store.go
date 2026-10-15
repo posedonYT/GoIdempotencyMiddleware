@@ -44,6 +44,17 @@ type Entry struct {
 	Response    *Response
 }
 
+// Waiter is an optional interface of a Store. A store that implements it lets
+// the middleware wait for an in-progress request to finish instead of
+// answering 409 Conflict at once (see WithWait).
+type Waiter interface {
+	// Wait blocks until the in-progress record for key is completed,
+	// released or expired, or until ctx is done, in which case it returns
+	// ctx.Err(). It returns nil at once if there is no in-progress record.
+	// After Wait returns nil the caller is expected to call Acquire again.
+	Wait(ctx context.Context, key string) error
+}
+
 // Store persists idempotency records and serializes concurrent use of one key.
 type Store interface {
 	// Acquire atomically inserts an in-progress record or returns the existing one.
@@ -64,4 +75,12 @@ var (
 	ErrBadKey = errors.New("idempotency: bad key")
 	// ErrNotFound is returned when there is no in-progress record for the key.
 	ErrNotFound = errors.New("idempotency: no in-progress record for key")
+	// ErrBodyTooLarge is returned when the request body exceeds the limit
+	// set by WithMaxRequestBody.
+	ErrBodyTooLarge = errors.New("idempotency: request body too large")
+	// ErrBadBody is returned when the request body cannot be read.
+	ErrBadBody = errors.New("idempotency: cannot read request body")
+	// ErrStoreFull is returned by a Store that has reached its capacity
+	// (see WithMaxEntries).
+	ErrStoreFull = errors.New("idempotency: store is full")
 )

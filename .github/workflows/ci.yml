@@ -18,6 +18,7 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
           cache: true
+      - run: go build ./...
       - run: go vet ./...
       - run: go test -race -count=1 -cover ./...
 
@@ -32,3 +33,13 @@ jobs:
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.14.0
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+      - run: make fuzz
